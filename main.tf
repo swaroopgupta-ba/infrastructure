@@ -624,7 +624,7 @@ resource "aws_iam_user_policy_attachment" "ghactions-app_codedeploy_policy_attac
   
 #   filter {
 #     name = "tag:Name"
-#     values = ["myEC2Instance"]
+#     values = ["csye-6225-webapp-instance"]
 #   }
 # }
 
@@ -670,7 +670,7 @@ resource "aws_autoscaling_group" "autoscaling" {
 # load balancer target group
 resource "aws_lb_target_group" "albTargetGroup" {
   name     = "albTargetGroup"
-  port     = "8000"
+  port     = "3000"
   protocol = "HTTP"
   vpc_id   = "${aws_vpc.vpc_01.id}"
   tags = {
@@ -682,7 +682,7 @@ resource "aws_lb_target_group" "albTargetGroup" {
     timeout             = 5
     interval            = 30
     path                = "/healthstatus"
-    port                = "8000"
+    port                = "3000"
     matcher             = "200"
   }
 }
@@ -781,4 +781,15 @@ resource "aws_lb_listener" "webapp-Listener" {
   }
 }
 
+resource "aws_route53_record" "www" {
+   zone_id = data.aws_route53_zone.selected.zone_id
+   name    = data.aws_route53_zone.selected.name
+   type    = "A"
+  
+   alias {
+     name = aws_lb.application-Load-Balancer.dns_name
+     zone_id = aws_lb.application-Load-Balancer.zone_id
+     evaluate_target_health = true
+   }
+ }
 # end 
