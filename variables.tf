@@ -44,3 +44,16 @@ variable "s3_domain" {
 variable "s3_name" {
   type = string
 }
+
+variable "aws_profile_name"{
+    type = string
+}
+variable "domain_Name"{
+    type = string
+}
+/* variable "aws_user_account_id"{
+    type = number
+} */
+variable "region" {
+  type = string
+}
