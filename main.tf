@@ -204,7 +204,7 @@ resource "aws_security_group" "database" {
       self             = false
       ipv6_cidr_blocks = []
       prefix_list_ids  = []
-    }
+    } 
   ]
   tags = {
     Name = "database"
@@ -224,7 +224,7 @@ resource "aws_db_subnet_group" "rds-subnet" {
 #db parameter group
 resource "aws_db_parameter_group" "rds-pg" {
   name   = "rds-pg"
-  family = "mysql5.6"
+  family = "mysql5.7"
 }
 
 #db instance
@@ -237,6 +237,7 @@ resource "aws_db_instance" "csye6225" {
   username               = "csye6225"
   password               = var.password
   db_subnet_group_name   = aws_db_subnet_group.rds-subnet.name
+  parameter_group_name = aws_db_parameter_group.rds-pg.name
   vpc_security_group_ids = [aws_security_group.database.id]
 
   multi_az                  = false
@@ -244,7 +245,7 @@ resource "aws_db_instance" "csye6225" {
   publicly_accessible       = false
   allocated_storage         = 10
   apply_immediately         = true
-  backup_retention_period   = 0
+  backup_retention_period   = 5
   final_snapshot_identifier = true
   skip_final_snapshot =  true
 }
@@ -279,7 +280,7 @@ data "template_file" "config_data" {
         cd home/ubuntu
         mkdir server
         cd server
-        echo "{\"db_host\":\"${aws_db_instance.csye6225.endpoint}\",\"db_user\":\"csye6225\",\"db_password\":\"${var.password}\",\"default_database\":\"csye6225\",\"db_port\":3306,\"s3_bucket\":\"${aws_s3_bucket.s3.bucket}\"}" > config.json
+        echo "{\"db_host\":\"${aws_db_instance.csye6225.endpoint}\",\"db_replica_host\":\"${aws_db_instance.rds-replica.endpoint}\",\"db_user\":\"csye6225\",\"db_password\":\"${var.password}\",\"default_database\":\"csye6225\",\"db_port\":3306,\"s3_bucket\":\"${aws_s3_bucket.s3.bucket}\"}" > config.json
         cd ..
         sudo chmod -R 777 server
     EOF
@@ -792,4 +793,237 @@ resource "aws_route53_record" "www" {
      evaluate_target_health = true
    }
  }
-# end 
+
+#AWS SNS topic
+// resource "aws_sns_topic" "user_updates" {
+//   name            = "user-updates-topic"
+//   delivery_policy = <<EOF
+// {
+//   "http": {
+//     "defaultHealthyRetryPolicy": {
+//       "minDelayTarget": 20,
+//       "maxDelayTarget": 20,
+//       "numRetries": 3,
+//       "numMaxDelayRetries": 0,
+//       "numNoDelayRetries": 0,
+//       "numMinDelayRetries": 0,
+//       "backoffFunction": "linear"
+//     },
+//     "disableSubscriptionOverrides": false,
+//     "defaultThrottlePolicy": {
+//       "maxReceivesPerSecond": 1
+//     }
+//   }
+// }
+// EOF
+// }
+
+resource "aws_db_instance" "rds-replica" {
+	allocated_storage = 20
+	depends_on = [aws_security_group.database, aws_db_parameter_group.rds-pg, aws_db_subnet_group.rds-subnet, aws_db_instance.csye6225]
+	engine = "mysql"
+	engine_version = "5.7"
+	instance_class = "db.t3.micro"
+	multi_az = false
+	identifier = "csye6225replica"
+	replicate_source_db = aws_db_instance.csye6225.arn
+	username = "csye6225"
+	password = var.password
+	db_subnet_group_name = aws_db_subnet_group.rds-subnet.name
+	parameter_group_name = aws_db_parameter_group.rds-pg.name
+	publicly_accessible = false
+	skip_final_snapshot = true
+	vpc_security_group_ids = [aws_security_group.database.id]
+	availability_zone = "us-east-1b"
+}
+
+resource "aws_dynamodb_table" "dynamodb_basic_table" {
+	name = "DynamoDB-terraform"
+	billing_mode = "PROVISIONED"
+	read_capacity = 10
+	write_capacity = 10
+	hash_key = "userid"
+
+	attribute {
+		name = "userid"
+		type = "S"
+	}
+
+	ttl {
+		attribute_name = "ExpirationTime"
+		enabled = true
+	}
+
+	tags = {
+		Name = "dynamodb-table"
+		Environment = var.aws_profile
+	}
+
+}
+
+resource "aws_iam_policy" "dynamodb_policy" {
+	name = "DynamoDB-Policy"
+	description = "Lambda function to upload data to DynamoDB"
+	policy = jsonencode({
+		"Version": "2012-10-17",
+		"Statement": [{
+				"Sid": "ListAndDescribe",
+				"Effect": "Allow",
+				"Action": [
+					"dynamodb:List*",
+					"dynamodb:DescribeReservedCapacity*",
+					"dynamodb:DescribeLimits",
+					"dynamodb:DescribeTimeToLive",
+					"dynamodb:Get*",
+					"dynamodb:PutItem*",
+				],
+				"Resource": "*"
+			},
+			{
+				"Sid": "SpecificTable",
+				"Effect": "Allow",
+				"Action": [
+					"dynamodb:BatchGet*",
+					"dynamodb:DescribeStream",
+					"dynamodb:DescribeTable",
+					"dynamodb:Get*",
+					"dynamodb:Query",
+					"dynamodb:Scan",
+					"dynamodb:BatchWrite*",
+					"dynamodb:CreateTable",
+					"dynamodb:Delete*",
+					"dynamodb:Update*",
+					"dynamodb:PutItem"
+				],
+				"Resource": "arn:aws:dynamodb:*:*:table/dynamo"
+			}
+		]
+	})
+}
+
+//EC2 DynamoDB role attachment
+resource "aws_iam_policy_attachment" "ec2_dynamoDB_attach" {
+	name = "ec2DynamoDBPolicy"
+	roles = ["${aws_iam_role.ec2_s3_access_role.name}"]
+	policy_arn = aws_iam_policy.dynamodb_policy.arn
+}
+
+resource "aws_lambda_function" "user_add_lamda" {
+	//check s3 bucket name
+	s3_bucket = "codedeploy.prod.prod.swaroopgupta.me"
+	s3_key = "userSignupLamda.zip"
+	function_name = "userSignupLamda"
+	role = aws_iam_role.serverless_lambda_user_role.arn
+	handler = "index.userSignupLamda"
+	timeout = 20
+	runtime = "nodejs14.x"
+
+	environment {
+		variables = {
+			DOMAIN_NAME = var.domain_Name
+		}
+	}
+}
+
+resource "aws_lambda_permission" "lambda_to_sns" {
+	statement_id = "AllowExecFromSNS"
+	action = "lambda:InvokeFunction"
+	function_name = aws_lambda_function.user_add_lamda.function_name
+	principal = "sns.amazonaws.com"
+	source_arn = aws_sns_topic.user_add.arn
+}
+
+resource "aws_iam_role" "serverless_lambda_user_role" {
+	name = "serverless_lambda_user_role"
+	assume_role_policy = jsonencode({
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Action": "sts:AssumeRole",
+			"Principal": {
+				"Service": "lambda.amazonaws.com"
+			},
+			"Effect": "Allow",
+			"Sid": ""
+		}]
+	})
+}
+
+resource "aws_iam_policy" "lamda_update_policy" {
+	name = "LamdaUpdatePolicy"
+	description = "Update Lamda from GH"
+	policy = jsonencode({
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Effect": "Allow",
+			"Action": "lambda:UpdateFunctionCode",
+			"Resource": [
+				"arn:aws:lambda:*:*:function:userSignupLamda"
+			]
+		}]
+	})
+}
+
+resource "aws_iam_policy" "lamda_ses_policy" {
+	name = "LamdaSendEmailPolicy"
+	description = "Send Mail through Lamda"
+	policy = jsonencode({
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Effect": "Allow",
+			"Action": [
+				"ses:SendEmail"
+			],
+			"Resource": "*"
+		}]
+	})
+}
+
+resource "aws_iam_policy_attachment" "lamda_ses_attach" {
+	name = "lamdaSESPolicy"
+	roles = ["${aws_iam_role.serverless_lambda_user_role.name}"]
+	policy_arn = aws_iam_policy.lamda_ses_policy.arn
+}
+
+resource "aws_iam_user_policy_attachment" "lamda_user_attach" {
+	user = "ghactions-app"
+	policy_arn = aws_iam_policy.lamda_update_policy.arn
+}
+
+//Lambda dynamo role attachment
+resource "aws_iam_policy_attachment" "lamda_user_dynamo_attach" {
+	name = "lamdaDynamoPolicy"
+	roles = ["${aws_iam_role.serverless_lambda_user_role.name}"]
+	policy_arn = aws_iam_policy.dynamodb_policy.arn
+}
+
+resource "aws_sns_topic" "user_add" {
+	name = "user-add-topic"
+}
+
+resource "aws_sns_topic_subscription" "lambda_serverless_topic_subscription" {
+	topic_arn = aws_sns_topic.user_add.arn
+	protocol = "lambda"
+	endpoint = aws_lambda_function.user_add_lamda.arn
+}
+
+resource "aws_iam_policy" "sns_ec2_policy" {
+	name = "SNS-EC2-Policy"
+	description = "EC2 for creation and publishing SNS Topics"
+	depends_on = [aws_iam_role.code_deploy_role]
+	policy = jsonencode({
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Action": [
+				"sns:*",
+			],
+			"Effect": "Allow",
+			"Resource": "*"
+		}]
+	})
+}
+
+resource "aws_iam_policy_attachment" "ec2_sns_attach" {
+	name = "ec2SnsAttach"
+	roles = ["${aws_iam_role.code_deploy_role.name}"]
+	policy_arn = aws_iam_policy.sns_ec2_policy.arn
+}
