@@ -248,6 +248,7 @@ resource "aws_db_instance" "csye6225" {
   backup_retention_period   = 5
   final_snapshot_identifier = true
   skip_final_snapshot =  true
+  availability_zone         = "us-east-1a"
 }
 
 resource "aws_s3_bucket" "s3" {
@@ -280,7 +281,7 @@ data "template_file" "config_data" {
         cd home/ubuntu
         mkdir server
         cd server
-        echo "{\"db_host\":\"${aws_db_instance.csye6225.endpoint}\",\"db_replica_host\":\"${aws_db_instance.rds-replica.endpoint}\",\"db_user\":\"csye6225\",\"db_password\":\"${var.password}\",\"default_database\":\"csye6225\",\"db_port\":3306,\"s3_bucket\":\"${aws_s3_bucket.s3.bucket}\"}" > config.json
+        echo "{\"db_host\":\"${aws_db_instance.csye6225.endpoint}\",\"db_replica_host\":\"${aws_db_instance.rds-replica.endpoint}\",\"db_user\":\"csye6225\",\"db_password\":\"${var.password}\",\"default_database\":\"csye6225\",\"db_port\":3306,\"s3_bucket\":\"${aws_s3_bucket.s3.bucket}\", \"SNS_TOPIC_ARN\":\"${aws_sns_topic.user_add.arn}\"}" > config.json
         cd ..
         sudo chmod -R 777 server
     EOF
@@ -444,7 +445,6 @@ EOF
 }
 
 # GH-Code-Deploy Policy for GitHub Actions to Call CodeDeploy
-
 resource "aws_iam_policy" "GH_Code_Deploy" {
   name   = "GH-Code-Deploy"
   policy = <<EOF
@@ -491,7 +491,6 @@ EOF
 # IAM Role for CodeDeploy
 resource "aws_iam_role" "code_deploy_role" {
   name = "CodeDeployServiceRole"
-
   assume_role_policy = <<EOF
 {
   "Version": "2012-10-17",
@@ -558,8 +557,6 @@ resource "aws_iam_policy" "ghactions-app_user_policy" {
 
 }
 
-
-
 #CodeDeploy App and Group for webapp
 resource "aws_codedeploy_app" "code_deploy_app" {
   compute_platform = "Server"
@@ -592,7 +589,6 @@ resource "aws_codedeploy_deployment_group" "code_deploy_deployment_group" {
   depends_on = [aws_codedeploy_app.code_deploy_app]
 }
 
-
 data "aws_caller_identity" "current" {}
 
 locals {
@@ -614,7 +610,6 @@ resource "aws_iam_user_policy_attachment" "ghactions-app_s3_policy_attach" {
   user       = "ghactions-app"
   policy_arn = "${aws_iam_policy.gh_upload_s3.arn}"
 }
-
 
 resource "aws_iam_user_policy_attachment" "ghactions-app_codedeploy_policy_attach" {
   user       = "ghactions-app"
@@ -664,7 +659,7 @@ resource "aws_autoscaling_group" "autoscaling" {
   target_group_arns = ["${aws_lb_target_group.albTargetGroup.arn}"]
   tag {
     key                 = "Name"
-    value               = "myEC2Instance"
+    value               = "csye-6225-webapp-instance"
     propagate_at_launch = true
   }
 }
@@ -734,7 +729,6 @@ resource "aws_cloudwatch_metric_alarm" "scaleUp" {
   insufficient_data_actions = []
 }
 
-
 #Load Balancer Security Group
 resource "aws_security_group" "loadBalancer" {
   name   = "loadBalance_security_group"
@@ -756,7 +750,6 @@ resource "aws_security_group" "loadBalancer" {
     Environment = "${var.aws_profile_name}"
   }
 }
-
 
 #Load balancer
 resource "aws_lb" "application-Load-Balancer" {
@@ -794,29 +787,6 @@ resource "aws_route53_record" "www" {
    }
  }
 
-#AWS SNS topic
-// resource "aws_sns_topic" "user_updates" {
-//   name            = "user-updates-topic"
-//   delivery_policy = <<EOF
-// {
-//   "http": {
-//     "defaultHealthyRetryPolicy": {
-//       "minDelayTarget": 20,
-//       "maxDelayTarget": 20,
-//       "numRetries": 3,
-//       "numMaxDelayRetries": 0,
-//       "numNoDelayRetries": 0,
-//       "numMinDelayRetries": 0,
-//       "backoffFunction": "linear"
-//     },
-//     "disableSubscriptionOverrides": false,
-//     "defaultThrottlePolicy": {
-//       "maxReceivesPerSecond": 1
-//     }
-//   }
-// }
-// EOF
-// }
 
 resource "aws_db_instance" "rds-replica" {
 	allocated_storage = 20
@@ -895,7 +865,7 @@ resource "aws_iam_policy" "dynamodb_policy" {
 					"dynamodb:Update*",
 					"dynamodb:PutItem"
 				],
-				"Resource": "arn:aws:dynamodb:*:*:table/dynamo"
+				"Resource": "arn:aws:dynamodb:*:*:table/DynamoDB-terraform"
 			}
 		]
 	})
@@ -909,28 +879,19 @@ resource "aws_iam_policy_attachment" "ec2_dynamoDB_attach" {
 }
 
 resource "aws_lambda_function" "user_add_lamda" {
-	//check s3 bucket name
 	s3_bucket = "codedeploy.prod.prod.swaroopgupta.me"
 	s3_key = "userSignupLamda.zip"
 	function_name = "userSignupLamda"
-	role = aws_iam_role.serverless_lambda_user_role.arn
-	handler = "index.userSignupLamda"
-	timeout = 20
+	role = "${aws_iam_role.serverless_lambda_user_role.arn}"
+	handler = "index.handler"
 	runtime = "nodejs14.x"
 
 	environment {
 		variables = {
-			DOMAIN_NAME = var.domain_Name
+			DOMAIN_NAME = var.domain_Name,
+      timeToLive = "5"
 		}
 	}
-}
-
-resource "aws_lambda_permission" "lambda_to_sns" {
-	statement_id = "AllowExecFromSNS"
-	action = "lambda:InvokeFunction"
-	function_name = aws_lambda_function.user_add_lamda.function_name
-	principal = "sns.amazonaws.com"
-	source_arn = aws_sns_topic.user_add.arn
 }
 
 resource "aws_iam_role" "serverless_lambda_user_role" {
@@ -948,82 +909,162 @@ resource "aws_iam_role" "serverless_lambda_user_role" {
 	})
 }
 
-resource "aws_iam_policy" "lamda_update_policy" {
-	name = "LamdaUpdatePolicy"
-	description = "Update Lamda from GH"
-	policy = jsonencode({
-		"Version": "2012-10-17",
-		"Statement": [{
-			"Effect": "Allow",
-			"Action": "lambda:UpdateFunctionCode",
-			"Resource": [
-				"arn:aws:lambda:*:*:function:userSignupLamda"
-			]
-		}]
-	})
-}
-
-resource "aws_iam_policy" "lamda_ses_policy" {
-	name = "LamdaSendEmailPolicy"
-	description = "Send Mail through Lamda"
-	policy = jsonencode({
-		"Version": "2012-10-17",
-		"Statement": [{
-			"Effect": "Allow",
-			"Action": [
-				"ses:SendEmail"
-			],
-			"Resource": "*"
-		}]
-	})
-}
-
-resource "aws_iam_policy_attachment" "lamda_ses_attach" {
-	name = "lamdaSESPolicy"
-	roles = ["${aws_iam_role.serverless_lambda_user_role.name}"]
-	policy_arn = aws_iam_policy.lamda_ses_policy.arn
-}
-
-resource "aws_iam_user_policy_attachment" "lamda_user_attach" {
-	user = "ghactions-app"
-	policy_arn = aws_iam_policy.lamda_update_policy.arn
-}
-
-//Lambda dynamo role attachment
-resource "aws_iam_policy_attachment" "lamda_user_dynamo_attach" {
-	name = "lamdaDynamoPolicy"
-	roles = ["${aws_iam_role.serverless_lambda_user_role.name}"]
-	policy_arn = aws_iam_policy.dynamodb_policy.arn
+resource "aws_iam_role_policy_attachment" "aws_lambda_policy_to_serverless_lambda_user_role" {
+  role = "${aws_iam_role.serverless_lambda_user_role.name}"
+  policy_arn = "${aws_iam_policy.aws_lambda_policy.arn}"
 }
 
 resource "aws_sns_topic" "user_add" {
 	name = "user-add-topic"
 }
 
-resource "aws_sns_topic_subscription" "lambda_serverless_topic_subscription" {
-	topic_arn = aws_sns_topic.user_add.arn
-	protocol = "lambda"
-	endpoint = aws_lambda_function.user_add_lamda.arn
+data "aws_iam_policy_document" "sns-topic-policy" {
+  policy_id = "__default_policy_ID"
+
+  statement {
+    actions = [
+      "SNS:Subscribe",
+      "SNS:SetTopicAttributes",
+      "SNS:RemovePermission",
+      "SNS:Receive",
+      "SNS:Publish",
+      "SNS:ListSubscriptionsByTopic",
+      "SNS:GetTopicAttributes",
+      "SNS:DeleteTopic",
+      "SNS:AddPermission",
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceOwner"
+
+      values = [
+        "${local.aws_user_account_id}",
+      ]
+    }
+
+    effect = "Allow"
+
+    principals {
+      type        = "AWS"
+      identifiers = ["*"]
+    }
+
+    resources = [
+      "${aws_sns_topic.user_add.arn}",
+    ]
+
+    sid = "__default_statement_ID"
+  }
+}
+
+resource "aws_sns_topic_policy" "sns_email_policy" {
+  arn    = "${aws_sns_topic.user_add.arn}"
+  policy = "${data.aws_iam_policy_document.sns-topic-policy.json}"
 }
 
 resource "aws_iam_policy" "sns_ec2_policy" {
 	name = "SNS-EC2-Policy"
 	description = "EC2 for creation and publishing SNS Topics"
-	depends_on = [aws_iam_role.code_deploy_role]
-	policy = jsonencode({
-		"Version": "2012-10-17",
-		"Statement": [{
-			"Action": [
-				"sns:*",
-			],
-			"Effect": "Allow",
-			"Resource": "*"
-		}]
-	})
+	policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "SNS:Publish"
+      ],
+      "Resource": "${aws_sns_topic.user_add.arn}"
+    }
+  ]
+}
+EOF
 }
 
-resource "aws_iam_policy_attachment" "ec2_sns_attach" {
-	name = "ec2SnsAttach"
-	roles = ["${aws_iam_role.code_deploy_role.name}"]
-	policy_arn = aws_iam_policy.sns_ec2_policy.arn
+resource "aws_iam_role_policy_attachment" "ec2_sns_attach" {
+	policy_arn = "${aws_iam_policy.sns_ec2_policy.arn}"
+  role = "${aws_iam_role.ec2_s3_access_role.name}"
+}
+
+resource "aws_sns_topic_subscription" "lambda_serverless_topic_subscription" {
+	topic_arn = "${aws_sns_topic.user_add.arn}"
+	protocol = "lambda"
+	endpoint = "${aws_lambda_function.user_add_lamda.arn}"
+}
+
+resource "aws_lambda_permission" "lambda_to_sns" {
+	statement_id = "AllowExecutionFromSNS"
+	action = "lambda:InvokeFunction"
+	function_name = "${aws_lambda_function.user_add_lamda.function_name}"
+	principal = "sns.amazonaws.com"
+	source_arn = "${aws_sns_topic.user_add.arn}"
+}
+
+resource "aws_iam_policy" "aws_lambda_policy" {
+  name        = "aws_lambda_policy"
+  description = "Lambda Policy for dynamo ses and cloudwatch logs"
+  policy      = <<EOF
+{
+   "Version": "2012-10-17",
+   "Statement": [
+       {
+           "Effect": "Allow",
+           "Action": [
+               "logs:CreateLogGroup",
+               "logs:CreateLogStream",
+               "logs:PutLogEvents"
+           ],
+           "Resource": "*"
+       },
+       {
+         "Sid": "LambdaDynamoDBAccess",
+         "Effect": "Allow",
+         "Action": [
+             "dynamodb:GetItem",
+             "dynamodb:PutItem",
+             "dynamodb:UpdateItem"
+         ],
+         "Resource": "arn:aws:dynamodb:${var.region}:${local.aws_user_account_id}:table/DynamoDB-terraform"
+       },
+       {
+         "Sid": "LambdaSESAccess",
+         "Effect": "Allow",
+         "Action": [
+             "ses:VerifyEmailAddress",
+             "ses:SendEmail",
+             "ses:SendRawEmail"
+         ], 
+         "Resource": "*"
+       }
+   ]
+}
+ EOF
+}
+
+resource "aws_iam_role_policy_attachment" "attachLambdaLogs" {
+  role       = aws_iam_role.ec2_s3_access_role.name
+  policy_arn = aws_iam_policy.aws_lambda_policy.arn
+}
+
+resource "aws_iam_policy" "lamda_update_policy" {
+  name        = "LamdaUpdatePolicy"
+  description = "Update Lamda from GH"
+  policy = jsonencode({
+    "Version" : "2012-10-17",
+    "Statement" : [
+      {
+        "Effect" : "Allow",
+        "Action" : "lambda:UpdateFunctionCode",
+        "Resource" : [
+          "arn:aws:lambda:*:*:function:userSignupLamda"
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_user_policy_attachment" "lamda_user_attach" {
+	user = "ghactions-app"
+	policy_arn = aws_iam_policy.lamda_update_policy.arn
 }
